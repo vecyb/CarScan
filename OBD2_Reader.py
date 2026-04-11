@@ -69,6 +69,34 @@ def hent_historikk() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def slett_kjøreturer(ider: list) -> bool:
+    """Sletter kjøreturer med gitte UUID-er fra Supabase."""
+    try:
+        sb = get_supabase()
+        for _id in ider:
+            sb.table("kjøreturer").delete().eq("id", _id).execute()
+        hent_historikk.clear()
+        return True
+    except Exception as e:
+        st.error(f"Kunne ikke slette: {e}")
+        return False
+
+
+def er_duplikat(filnavn: str, varighet_s: float) -> bool:
+    """Sjekker om en kjøretur med samme filnavn og varighet allerede er lagret."""
+    try:
+        sb = get_supabase()
+        res = (sb.table("kjøreturer")
+               .select("id")
+               .eq("filnavn", filnavn)
+               .gte("varighet_s", varighet_s - 1.0)
+               .lte("varighet_s", varighet_s + 1.0)
+               .execute())
+        return len(res.data) > 0
+    except Exception:
+        return False
+
+
 # -----------------------------------------------------------------------------
 # SIGNALDEFINISJONER
 # -----------------------------------------------------------------------------
@@ -722,36 +750,39 @@ def main():
     }
     total = beregn_total(analyser)
 
-    # ── LAGRE TIL SUPABASE (automatisk ved første visning av fil) ──────────
-    cache_key = f"lagret_{opplastet_fil.name}"
+    # ── LAGRE TIL SUPABASE (automatisk, med duplikat-sjekk) ──────────────
+    varighet_s_verdi = float(stats.get("varighet_s", 0))
+    cache_key = f"lagret_{opplastet_fil.name}_{varighet_s_verdi:.0f}"
     if cache_key not in st.session_state:
-        rad = {
-            "filnavn":        opplastet_fil.name,
-            "opprettet":      datetime.utcnow().isoformat(),
-            "varighet_s":     float(stats.get("varighet_s", 0)),
-            "snitt_rpm":      float(stats.get("snitt_rpm", 0)) if stats.get("snitt_rpm") else None,
-            "maks_rpm":       float(stats.get("maks_rpm", 0))  if stats.get("maks_rpm")  else None,
-            "snitt_last":     float(stats.get("snitt_last", 0)) if stats.get("snitt_last") else None,
-            "maks_last":      float(stats.get("maks_last", 0))  if stats.get("maks_last")  else None,
-            "snitt_forbruk":  float(stats.get("snitt_forbruk", 0)) if stats.get("snitt_forbruk") else None,
-            "maks_forbruk":   float(stats.get("maks_forbruk", 0))  if stats.get("maks_forbruk")  else None,
-            "total_drivstoff":float(stats.get("total_drivstoff", 0)) if stats.get("total_drivstoff") else None,
-            "distanse":       float(stats.get("distanse", 0)) if stats.get("distanse") else None,
-            "maks_temp":      float(analyser["kaldstart"].get("maks_temp", 0)) if analyser["kaldstart"].get("maks_temp") else None,
-            "snitt_maf":      None,
-            "batteri_v":      float(analyser["batteri"].get("snitt_v", 0)) if analyser["batteri"].get("snitt_v") else None,
-            "kaldstart_score":analyser["kaldstart"].get("score"),
-            "drivstoff_score":analyser["drivstoff"].get("score"),
-            "batteri_score":  analyser["batteri"].get("score"),
-            "feilkode_score": analyser["feilkoder"].get("score"),
-            "motorlast_score":analyser["motorlast"].get("score"),
-            "total_score":    float(total),
-        }
-        if lagre_kjoretur(rad):
-            st.session_state[cache_key] = True
-            st.toast("Kjøretur lagret i historikk!", icon="✅")
-            # Tving oppdatering av historikk-cache
-            hent_historikk.clear()
+        if er_duplikat(opplastet_fil.name, varighet_s_verdi):
+            st.session_state[cache_key] = True  # merk som allerede lagret
+        else:
+            rad = {
+                "filnavn":        opplastet_fil.name,
+                "opprettet":      datetime.utcnow().isoformat(),
+                "varighet_s":     float(stats.get("varighet_s", 0)),
+                "snitt_rpm":      float(stats.get("snitt_rpm", 0)) if stats.get("snitt_rpm") else None,
+                "maks_rpm":       float(stats.get("maks_rpm", 0))  if stats.get("maks_rpm")  else None,
+                "snitt_last":     float(stats.get("snitt_last", 0)) if stats.get("snitt_last") else None,
+                "maks_last":      float(stats.get("maks_last", 0))  if stats.get("maks_last")  else None,
+                "snitt_forbruk":  float(stats.get("snitt_forbruk", 0)) if stats.get("snitt_forbruk") else None,
+                "maks_forbruk":   float(stats.get("maks_forbruk", 0))  if stats.get("maks_forbruk")  else None,
+                "total_drivstoff":float(stats.get("total_drivstoff", 0)) if stats.get("total_drivstoff") else None,
+                "distanse":       float(stats.get("distanse", 0)) if stats.get("distanse") else None,
+                "maks_temp":      float(analyser["kaldstart"].get("maks_temp", 0)) if analyser["kaldstart"].get("maks_temp") else None,
+                "snitt_maf":      None,
+                "batteri_v":      float(analyser["batteri"].get("snitt_v", 0)) if analyser["batteri"].get("snitt_v") else None,
+                "kaldstart_score":analyser["kaldstart"].get("score"),
+                "drivstoff_score":analyser["drivstoff"].get("score"),
+                "batteri_score":  analyser["batteri"].get("score"),
+                "feilkode_score": analyser["feilkoder"].get("score"),
+                "motorlast_score":analyser["motorlast"].get("score"),
+                "total_score":    float(total),
+            }
+            if lagre_kjoretur(rad):
+                st.session_state[cache_key] = True
+                st.toast("Kjøretur lagret!", icon="✅")
+                hent_historikk.clear()
 
     # ── FANER ──────────────────────────────────────────────────────────────
     fane1, fane2, fane3, fane4, fane5, fane6 = st.tabs([
@@ -847,7 +878,34 @@ def main():
         else:
             st.subheader(f"📚 {len(hist)} lagrede kjøreturer")
 
-            # Nøkkeltall sammenlignet med historisk snitt
+            # ── Velg tur fra historikk for analyse ────────────────────────
+            st.markdown("#### Åpne en tidligere tur for analyse")
+            hist_visning = hist.copy()
+            hist_visning["visningsnavn"] = hist_visning.apply(
+                lambda r: f"{r['opprettet'].strftime('%d.%m.%Y %H:%M')}  —  {r['filnavn']}  "
+                          f"(score: {r['total_score']:.1f}/10)", axis=1
+            )
+            valgt_visning = st.selectbox(
+                "Velg tur",
+                options=["— Vis opplastet fil —"] + list(hist_visning["visningsnavn"]),
+                key="historikk_valg",
+            )
+            if valgt_visning != "— Vis opplastet fil —":
+                valgt_rad = hist_visning[hist_visning["visningsnavn"] == valgt_visning].iloc[0]
+                st.info(
+                    f"Du har valgt **{valgt_rad['filnavn']}** fra {valgt_rad['opprettet'].strftime('%d.%m.%Y %H:%M')}. "
+                    f"For full grafanalyse av denne turen må du laste opp CSV-filen på nytt — "
+                    f"dataene under viser lagrede nøkkeltall fra da filen ble importert."
+                )
+                kol1, kol2, kol3, kol4 = st.columns(4)
+                with kol1: st.metric("Totalscore", f"{valgt_rad.get('total_score', 0):.1f}/10")
+                with kol2: st.metric("Snitt RPM", f"{valgt_rad.get('snitt_rpm', 0):.0f}")
+                with kol3: st.metric("Forbruk", f"{valgt_rad.get('snitt_forbruk', 0):.2f} L/h")
+                with kol4: st.metric("Varighet", f"{valgt_rad.get('varighet_s', 0)/60:.1f} min")
+
+            st.divider()
+
+            # ── Sammenligning med historisk snitt ─────────────────────────
             if len(hist) > 1:
                 st.markdown("#### Denne turen vs historisk snitt")
                 col1, col2, col3, col4 = st.columns(4)
@@ -876,11 +934,10 @@ def main():
                                   delta=f"{n_snitt - h_snitt:+.1f}% vs snitt")
                 st.divider()
 
-            # Scorer over tid
+            # ── Scorer og trender ─────────────────────────────────────────
             st.markdown("#### Helssescorer over tid")
             st.plotly_chart(lag_score_historikk(hist), use_container_width=True)
 
-            # Trender
             st.markdown("#### Nøkkeltrender")
             col1, col2 = st.columns(2)
             with col1:
@@ -898,22 +955,60 @@ def main():
                     st.plotly_chart(lag_historikk_trend(hist, "maks_temp",
                         "Maks kjølevæsketemp (°C)", "#880E4F"), use_container_width=True)
 
-            # Tabell over alle turer
+            # ── Tabell med sletting ───────────────────────────────────────
             st.markdown("#### Alle turer")
-            vis_kol = ["opprettet", "filnavn", "varighet_s", "snitt_rpm",
+            st.caption("Velg turer i tabellen og trykk slett for å fjerne dem.")
+
+            vis_kol = ["id", "opprettet", "filnavn", "varighet_s", "snitt_rpm",
                        "snitt_forbruk", "total_score", "kaldstart_score",
                        "drivstoff_score", "motorlast_score"]
             vis_kol = [k for k in vis_kol if k in hist.columns]
-            st.dataframe(
-                hist[vis_kol].rename(columns={
+
+            tabell_data = hist[vis_kol].copy()
+            tabell_data["opprettet"] = tabell_data["opprettet"].dt.strftime("%d.%m.%Y %H:%M")
+
+            # Bruk st.data_editor for avkrysningsbokser
+            tabell_data.insert(0, "Velg", False)
+            redigert = st.data_editor(
+                tabell_data.rename(columns={
                     "opprettet": "Dato", "filnavn": "Fil",
                     "varighet_s": "Varighet (s)", "snitt_rpm": "RPM",
                     "snitt_forbruk": "Forbruk (L/h)", "total_score": "Total",
                     "kaldstart_score": "Kaldstart", "drivstoff_score": "Drivstoff",
                     "motorlast_score": "Motorlast",
                 }).round(2),
-                use_container_width=True, height=300,
+                column_config={
+                    "Velg": st.column_config.CheckboxColumn("Velg", default=False),
+                    "id": None,  # skjul UUID-kolonnen
+                },
+                disabled=[c for c in tabell_data.columns if c not in ["Velg", "id"]],
+                use_container_width=True,
+                height=350,
+                key="tur_tabell",
             )
+
+            # Finn valgte rader
+            valgte_rader = redigert[redigert["Velg"] == True]
+            antall_valgt = len(valgte_rader)
+
+            col_slett1, col_slett2 = st.columns([1, 4])
+            with col_slett1:
+                slett_knapp = st.button(
+                    f"🗑️ Slett {antall_valgt} tur{'er' if antall_valgt != 1 else ''}",
+                    disabled=(antall_valgt == 0),
+                    type="primary",
+                )
+            with col_slett2:
+                if antall_valgt > 0:
+                    st.caption(f"{antall_valgt} tur(er) valgt")
+
+            if slett_knapp and antall_valgt > 0:
+                # Hent UUID-er fra original tabell basert på indeks
+                valgte_indekser = valgte_rader.index.tolist()
+                ider = tabell_data.loc[valgte_indekser, "id"].tolist()
+                if slett_kjøreturer(ider):
+                    st.success(f"Slettet {antall_valgt} kjøretur(er).")
+                    st.rerun()
 
     # ── TIDSSERIER ─────────────────────────────────────────────────────────
     with fane4:
