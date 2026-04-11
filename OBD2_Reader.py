@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-OBD2 Analyse - Car Scanner ELM OBD2 (Stanislav Svistunov)
-==========================================================
-Streamlit-app for interaktiv visualisering og helseanalyse av OBD2-data.
+OBD2 Analyse - Car Scanner ELM OBD2
+=====================================
+Streamlit-app med Supabase-integrasjon for lagring av kjørehistorikk.
 
 Kjoer med:
     streamlit run obd2_app.py
 
 Avhengigheter:
-    pip install streamlit plotly pandas
+    pip install streamlit plotly pandas supabase
 """
 
 import streamlit as st
@@ -17,6 +17,8 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+from supabase import create_client
+from datetime import datetime
 
 # -----------------------------------------------------------------------------
 # SIDEKONFIGURASJON
@@ -30,6 +32,44 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
+# SUPABASE-TILKOBLING
+# -----------------------------------------------------------------------------
+
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
+def lagre_kjoretur(rad: dict) -> bool:
+    """Lagrer en kjøretur til Supabase. Returnerer True hvis vellykket."""
+    try:
+        sb = get_supabase()
+        sb.table("kjøreturer").insert(rad).execute()
+        return True
+    except Exception as e:
+        st.error(f"Kunne ikke lagre kjøretur: {e}")
+        return False
+
+
+@st.cache_data(ttl=60)
+def hent_historikk() -> pd.DataFrame:
+    """Henter alle lagrede kjøreturer fra Supabase. Cache i 60 sekunder."""
+    try:
+        sb = get_supabase()
+        res = sb.table("kjøreturer").select("*").order("opprettet", desc=True).execute()
+        if res.data:
+            df = pd.DataFrame(res.data)
+            df["opprettet"] = pd.to_datetime(df["opprettet"])
+            return df
+        return pd.DataFrame()
+    except Exception as e:
+        st.warning(f"Kunne ikke hente historikk: {e}")
+        return pd.DataFrame()
+
+
+# -----------------------------------------------------------------------------
 # SIGNALDEFINISJONER
 # -----------------------------------------------------------------------------
 
@@ -40,7 +80,7 @@ SIGNALER = {
     "Calculated instant fuel rate":     ("Drivstofforbruk",     "L/h",   "#1B5E20"),
     "MAF air flow rate":                ("Luftmasserate",       "g/s",   "#4A148C"),
     "Vehicle acceleration":             ("Akselerasjon",        "g",     "#006064"),
-    "Throttle position":                ("Gasspårag",           "%",     "#F57F17"),
+    "Throttle position":                ("Gasspådrag",          "%",     "#F57F17"),
     "Engine coolant temperature":       ("Kjølevæske",          "°C",    "#880E4F"),
     "Intake air temperature":           ("Innsugsluft",         "°C",    "#BF360C"),
     "Instant engine power (based on fuel consumption)": ("Motoreffekt", "hp", "#37474F"),
@@ -259,19 +299,12 @@ def score_emoji(score: float) -> str:
 
 
 def _gauge_figur(score, tittel, hoyde, font_size, domain_y0, margin_t, margin_b):
-    """Intern hjelpefunksjon – bygg én gauge-figur med eksplisitte parametere."""
     farge = score_farge(score)
-    # Plotly plasserer "number" i rommet UNDER domain.y[0].
-    # Ved å sette domain_y0 kalibrerer vi nøyaktig hvor tall-rommet er,
-    # slik at scoren havner sentrert mellom bue-endepunktene.
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=score,
         domain={"x": [0, 1], "y": [domain_y0, 1.0]},
-        number={
-            "font": {"size": font_size, "color": farge, "family": "Arial Black"},
-            "suffix": "/10",
-        },
+        number={"font": {"size": font_size, "color": farge, "family": "Arial Black"}, "suffix": "/10"},
         title={"text": tittel, "font": {"size": 11}, "align": "center"},
         gauge={
             "axis": {"range": [0, 10], "tickwidth": 1, "tickfont": {"size": 9}},
@@ -283,47 +316,24 @@ def _gauge_figur(score, tittel, hoyde, font_size, domain_y0, margin_t, margin_b)
                 {"range": [6,  8],  "color": "#fff9c4"},
                 {"range": [8, 10],  "color": "#c8e6c9"},
             ],
-            "threshold": {"line": {"color": farge, "width": 4},
-                          "thickness": 0.85, "value": score},
+            "threshold": {"line": {"color": farge, "width": 4}, "thickness": 0.85, "value": score},
         },
     ))
-    fig.update_layout(
-        height=hoyde,
-        margin=dict(l=20, r=20, t=margin_t, b=margin_b),
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
+    fig.update_layout(height=hoyde, margin=dict(l=20, r=20, t=margin_t, b=margin_b),
+                      paper_bgcolor="rgba(0,0,0,0)")
     return fig
 
 
-def lag_gauge(score: float, tittel: str, hoyde: int = 220) -> go.Figure:
-    """
-    Liten gauge for hver enkelt faktor (brukt inne i expander-kortene).
-    Figur: 180px høy. domain_y0=0.18 gir tall sentrert under buen.
-    """
-    return _gauge_figur(
-        score=score, tittel=tittel,
-        hoyde=180,
-        font_size=30,
-        domain_y0=0.22,   # buen starter 22% opp → tall i nedre 22% = linje med endepunkter
-        margin_t=10, margin_b=5,
-    )
+def lag_gauge(score, tittel):
+    return _gauge_figur(score, tittel, hoyde=180, font_size=30,
+                        domain_y0=0.18, margin_t=30, margin_b=10)
+
+def lag_gauge_total(score, tittel):
+    return _gauge_figur(score, tittel, hoyde=280, font_size=46,
+                        domain_y0=0.22, margin_t=30, margin_b=10)
 
 
-def lag_gauge_total(score: float, tittel: str) -> go.Figure:
-    """
-    Stor gauge for totalvurdering øverst på bilhelse-siden.
-    Figur: 280px høy. domain_y0=0.22 gir bedre proporsjon for større figur.
-    """
-    return _gauge_figur(
-        score=score, tittel=tittel,
-        hoyde=280,
-        font_size=46,
-        domain_y0=0.22,   # større figur → litt mer rom under buen
-        margin_t=30, margin_b=10,
-    )
-
-
-def analyser_kaldstart(df: pd.DataFrame) -> dict:
+def analyser_kaldstart(df):
     r = {"tilgjengelig": False, "score": None, "detaljer": [], "forklaring": "", "tid_serie": None}
     kjoyl = hent_signal(df, "Engine coolant temperature")
     rpm   = hent_signal(df, "Engine RPM")
@@ -336,14 +346,14 @@ def analyser_kaldstart(df: pd.DataFrame) -> dict:
     maks_temp      = felles["temp"].max()
     snitt_rpm_kald = kald["rpm"].mean() if len(kald) > 0 else None
     maks_rpm_kald  = kald["rpm"].max()  if len(kald) > 0 else None
-    r["maks_temp"]      = maks_temp
+    r["maks_temp"] = maks_temp
     r["snitt_rpm_kald"] = snitt_rpm_kald
     r["maks_rpm_kald"]  = maks_rpm_kald
-    r["tid_serie"]      = felles
+    r["tid_serie"] = felles
     d = []
     if snitt_rpm_kald is None:
         score = 7.0
-        d.append("Ikke nok data fra kaldkjøringsfasen til full vurdering.")
+        d.append("Ikke nok data fra kaldkjøringsfasen.")
     elif snitt_rpm_kald < 1000:
         score = 9.5
         d.append(f"Utmerket: snitt {snitt_rpm_kald:.0f} rpm under kaldkjøring.")
@@ -355,23 +365,22 @@ def analyser_kaldstart(df: pd.DataFrame) -> dict:
         d.append(f"Moderat: {snitt_rpm_kald:.0f} rpm — noe høyt for kald motor.")
     else:
         score = 2.5
-        d.append(f"Høy belastning på kald motor: {snitt_rpm_kald:.0f} rpm i snitt.")
+        d.append(f"Høy belastning på kald motor: {snitt_rpm_kald:.0f} rpm.")
     if maks_rpm_kald and maks_rpm_kald > 3000:
         score = max(1.0, score - 2.0)
         d.append(f"Advarsel: {maks_rpm_kald:.0f} rpm maks mens motoren var under 70°C.")
     if maks_temp < 70:
-        d.append(f"Merk: kjølevæsken nådde bare {maks_temp:.0f}°C — motoren ble ikke fullt varm i denne loggøkten.")
+        d.append(f"Merk: kjølevæsken nådde bare {maks_temp:.0f}°C i denne loggøkten.")
     r["score"] = round(score, 1)
     r["detaljer"] = d
     r["forklaring"] = (
         "En kald motor tåler dårligere høy belastning fordi motoroljen ikke har nådd "
-        "optimal viskositet og metalldelene ikke er varmeekspandert til riktige toleranser. "
-        "Ideelt bør RPM holdes under 1500 de første minuttene etter kaldstart."
+        "optimal viskositet. Ideelt bør RPM holdes under 1500 de første minuttene etter kaldstart."
     )
     return r
 
 
-def analyser_drivstoff(df: pd.DataFrame) -> dict:
+def analyser_drivstoff(df):
     r = {"tilgjengelig": False, "score": None, "detaljer": [], "forklaring": "",
          "snitt": 0, "maks": 0, "forventet_min": 0.6, "forventet_max": 1.2}
     forbruk = hent_signal(df, "Calculated instant fuel rate")
@@ -384,10 +393,8 @@ def analyser_drivstoff(df: pd.DataFrame) -> dict:
     r["snitt"] = snitt
     r["maks"]  = maks
     FMIN, FMAX = 0.6, 1.2
-    d = [
-        f"Snitt: {snitt:.2f} L/h  |  Maks: {maks:.2f} L/h",
-        f"Forventet tomgangsforbruk: {FMIN}–{FMAX} L/h",
-    ]
+    d = [f"Snitt: {snitt:.2f} L/h  |  Maks: {maks:.2f} L/h",
+         f"Forventet tomgangsforbruk: {FMIN}–{FMAX} L/h"]
     if snitt <= FMAX:
         score = 9.0
         d.append("Forbruket er innenfor forventet nivå for tomgang.")
@@ -401,18 +408,17 @@ def analyser_drivstoff(df: pd.DataFrame) -> dict:
         d.append(f"Snitt luftmasserate (MAF): {snitt_maf:.1f} g/s")
         if snitt_maf > 15:
             score = max(1.0, score - 1.5)
-            d.append("Høy MAF på tomgang — mulig luftlekkasje eller sensor-feil.")
+            d.append("Høy MAF på tomgang — mulig luftlekkasje.")
     r["score"] = round(score, 1)
     r["detaljer"] = d
     r["forklaring"] = (
         "Drivstofforbruk på tomgang gjenspeiler motorens grunnleggende effektivitet. "
-        "Høyere forbruk enn forventet kan indikere feil i innsprøytning, "
-        "slitt tenning, tilstoppet luftfilter, eller karbonoppbygging."
+        "Høyere enn forventet kan indikere feil i innsprøytning, slitt tenning eller tilstoppet luftfilter."
     )
     return r
 
 
-def analyser_batteri(df: pd.DataFrame) -> dict:
+def analyser_batteri(df):
     r = {"tilgjengelig": False, "score": None, "detaljer": [], "forklaring": "", "snitt_v": 0}
     batt = hent_signal(df, "OBD Module Voltage")
     if batt is None or batt.dropna().empty:
@@ -421,39 +427,32 @@ def analyser_batteri(df: pd.DataFrame) -> dict:
     r["tilgjengelig"] = True
     data = batt.dropna()
     snitt_v = data.mean()
-    min_v   = data.min()
-    maks_v  = data.max()
     r["snitt_v"] = snitt_v
-    d = [
-        f"Snitt: {snitt_v:.2f} V  |  Min: {min_v:.2f} V  |  Maks: {maks_v:.2f} V",
-        "Normalt med motor i gang: 13.8 – 14.8 V",
-    ]
+    d = [f"Snitt: {snitt_v:.2f} V  |  Min: {data.min():.2f} V  |  Maks: {data.max():.2f} V",
+         "Normalt med motor i gang: 13.8 – 14.8 V"]
     if 13.8 <= snitt_v <= 14.8:
         score = 9.5
-        d.append("Ladespenning er perfekt — generator og batteri ser bra ut.")
+        d.append("Ladespenning er perfekt.")
     elif 13.5 <= snitt_v < 13.8:
         score = 7.0
-        d.append("Litt lav ladespenning — kan tyde på slitt batteri eller generator.")
+        d.append("Litt lav ladespenning — sjekk batteri/generator.")
     elif snitt_v > 14.8:
         score = 6.0
-        d.append("Litt høy spenning — mulig overladning, sjekk generatoren.")
+        d.append("Litt høy spenning — mulig overladning.")
     else:
         score = 4.0
-        d.append("Lav ladespenning — batteri eller generator bør sjekkes snart.")
+        d.append("Lav ladespenning — bør sjekkes snart.")
     r["score"] = round(score, 1)
     r["detaljer"] = d
-    r["forklaring"] = (
-        "Med motoren i gang lader generatoren batteriet. Normal ladespenning er 13.8–14.8V. "
-        "Under 13.5V kan indikere svak generator eller batteri. Over 14.8V kan skade batteriet."
-    )
+    r["forklaring"] = "Normal ladespenning med motor i gang er 13.8–14.8V. Avvik kan indikere svak generator eller batteri."
     return r
 
 
-def analyser_feilkoder(df: pd.DataFrame) -> dict:
+def analyser_feilkoder(df):
     r = {"tilgjengelig": False, "score": None, "detaljer": [], "forklaring": "", "mil_km": 0}
     mil = hent_signal(df, "Distance traveled with MIL on")
     if mil is None:
-        r["forklaring"] = "Mangler MIL-data (Check Engine-lampe)."
+        r["forklaring"] = "Mangler MIL-data."
         return r
     r["tilgjengelig"] = True
     mil_km = mil.dropna().max()
@@ -470,15 +469,11 @@ def analyser_feilkoder(df: pd.DataFrame) -> dict:
         d.append(f"{mil_km:.0f} km kjørt med MIL på — les feilkoder umiddelbart.")
     r["score"] = round(score, 1)
     r["detaljer"] = d
-    r["forklaring"] = (
-        "MIL (Malfunction Indicator Lamp) er Check Engine-lampen. "
-        "Distansen logget med MIL aktiv viser om bilen har kjørt med en registrert feil. "
-        "Selv om lampen ikke lyser nå kan historiske feil vises her."
-    )
+    r["forklaring"] = "MIL (Check Engine-lampen) indikerer registrerte feil. Selv historiske feil vises her."
     return r
 
 
-def analyser_motorlast(df: pd.DataFrame) -> dict:
+def analyser_motorlast(df):
     r = {"tilgjengelig": False, "score": None, "detaljer": [], "forklaring": ""}
     last = hent_signal(df, "Calculated engine load value")
     if last is None:
@@ -487,10 +482,7 @@ def analyser_motorlast(df: pd.DataFrame) -> dict:
     r["tilgjengelig"] = True
     snitt = last.mean()
     maks  = last.max()
-    d = [
-        f"Snitt motorlast: {snitt:.1f}%  |  Maks: {maks:.1f}%",
-        "Forventet på tomgang: 20–45%",
-    ]
+    d = [f"Snitt motorlast: {snitt:.1f}%  |  Maks: {maks:.1f}%", "Forventet på tomgang: 20–45%"]
     if 20 <= snitt <= 45:
         score = 9.0
         d.append("Motorlasten er normal for tomgang.")
@@ -505,15 +497,11 @@ def analyser_motorlast(df: pd.DataFrame) -> dict:
         d.append("Høy last på tomgang — bør undersøkes av verksted.")
     r["score"] = round(score, 1)
     r["detaljer"] = d
-    r["forklaring"] = (
-        "Motorlast på tomgang reflekterer hvor hardt motoren jobber bare for å holde seg i gang. "
-        "Høy tomgangslast kan indikere mekanisk motstand, karbonoppbygging på innsugventiler, "
-        "slitt tenning, eller at ekstrautstyr (AC, varmepumpe) trekker mye strøm."
-    )
+    r["forklaring"] = "Høy tomgangslast kan indikere karbonoppbygging, slitt tenning eller mekanisk motstand."
     return r
 
 
-def beregn_total(analyser: dict) -> float:
+def beregn_total(analyser):
     vekter = {"kaldstart": 3.0, "drivstoff": 2.0, "batteri": 1.5, "feilkoder": 2.5, "motorlast": 1.0}
     vs, vt = 0.0, 0.0
     for navn, vekt in vekter.items():
@@ -524,11 +512,10 @@ def beregn_total(analyser: dict) -> float:
     return round(vs / vt, 1) if vt > 0 else 0.0
 
 
-def lag_forbruk_plot(r: dict) -> go.Figure:
-    snitt    = r.get("snitt", 0)
-    fmin     = r.get("forventet_min", 0.6)
-    fmax     = r.get("forventet_max", 1.2)
-    fmidt    = (fmin + fmax) / 2
+def lag_forbruk_plot(r):
+    snitt = r.get("snitt", 0)
+    fmin, fmax = r.get("forventet_min", 0.6), r.get("forventet_max", 1.2)
+    fmidt = (fmin + fmax) / 2
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=["Forventet (midt)", "Faktisk snitt"],
@@ -537,35 +524,100 @@ def lag_forbruk_plot(r: dict) -> go.Figure:
         text=[f"{fmidt:.2f} L/h", f"{snitt:.2f} L/h"],
         textposition="outside", width=0.4,
     ))
-    fig.add_hrect(y0=fmin, y1=fmax, fillcolor="#c8e6c9", opacity=0.4,
-        line_width=0, annotation_text="Forventet område",
-        annotation_position="top right", annotation_font_size=10)
-    fig.update_layout(
-        yaxis_title="L/h",
-        yaxis=dict(range=[0, max(snitt, fmax) * 1.4]),
+    fig.add_hrect(y0=fmin, y1=fmax, fillcolor="#c8e6c9", opacity=0.4, line_width=0,
+        annotation_text="Forventet område", annotation_position="top right", annotation_font_size=10)
+    fig.update_layout(yaxis_title="L/h", yaxis=dict(range=[0, max(snitt, fmax) * 1.4]),
         height=280, margin=dict(l=40, r=20, t=20, b=40), showlegend=False)
     return fig
 
 
-def lag_kaldstart_plot(r: dict) -> go.Figure:
+def lag_kaldstart_plot(r):
     felles = r.get("tid_serie")
     if felles is None or len(felles) == 0:
         return go.Figure()
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Scatter(
-        x=felles.index, y=felles["temp"], name="Kjølevæske (°C)",
+    fig.add_trace(go.Scatter(x=felles.index, y=felles["temp"], name="Kjølevæske (°C)",
         line=dict(color="#880E4F", width=2.5)), secondary_y=False)
-    fig.add_trace(go.Scatter(
-        x=felles.index, y=felles["rpm"], name="RPM",
+    fig.add_trace(go.Scatter(x=felles.index, y=felles["rpm"], name="RPM",
         line=dict(color="#B71C1C", width=2, dash="dot")), secondary_y=True)
     fig.add_hline(y=70, line_dash="dash", line_color="#43A047", line_width=2,
-        annotation_text="70°C — motor varm", annotation_font_size=10,
-        secondary_y=False)
+        annotation_text="70°C — motor varm", annotation_font_size=10, secondary_y=False)
     fig.update_yaxes(title_text="Kjølevæske (°C)", secondary_y=False, title_font_color="#880E4F")
     fig.update_yaxes(title_text="RPM", secondary_y=True, title_font_color="#B71C1C")
     fig.update_xaxes(title_text="Tid (sekunder)")
     fig.update_layout(height=300, margin=dict(l=60, r=60, t=20, b=50),
         legend=dict(orientation="h", y=1.1), hovermode="x unified")
+    return fig
+
+# -----------------------------------------------------------------------------
+# HISTORIKK-PLOTT
+# -----------------------------------------------------------------------------
+
+def lag_historikk_trend(hist: pd.DataFrame, kolonne: str, tittel: str, farge: str) -> go.Figure:
+    """Linjeplott av én metrikk over alle lagrede kjøreturer."""
+    data = hist[["opprettet", kolonne]].dropna().sort_values("opprettet")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=data["opprettet"], y=data[kolonne],
+        mode="lines+markers",
+        line=dict(color=farge, width=2),
+        marker=dict(size=7, color=farge),
+        hovertemplate=f"<b>{tittel}</b><br>%{{x|%d.%m.%Y}}<br>%{{y:.2f}}<extra></extra>",
+    ))
+    # Glidende snitt hvis nok datapunkter
+    if len(data) >= 3:
+        data["snitt"] = data[kolonne].rolling(3, min_periods=1).mean()
+        fig.add_trace(go.Scatter(
+            x=data["opprettet"], y=data["snitt"],
+            mode="lines", name="Glidende snitt (3)",
+            line=dict(color=farge, width=1.5, dash="dot"),
+            opacity=0.6,
+        ))
+    fig.update_layout(
+        title=tittel, height=280,
+        margin=dict(l=50, r=20, t=40, b=40),
+        showlegend=len(data) >= 3,
+        hovermode="x unified",
+        yaxis_title="",
+        xaxis_title="",
+    )
+    return fig
+
+
+def lag_score_historikk(hist: pd.DataFrame) -> go.Figure:
+    """Alle helssescorer over tid i ett plott."""
+    score_kol = {
+        "total_score":     ("Totalscorecore",    "#1565C0"),
+        "kaldstart_score": ("Kaldstart",         "#880E4F"),
+        "drivstoff_score": ("Drivstoff",         "#1B5E20"),
+        "motorlast_score": ("Motorlast",         "#E65100"),
+    }
+    fig = go.Figure()
+    for kol, (navn, farge) in score_kol.items():
+        if kol in hist.columns:
+            data = hist[["opprettet", kol]].dropna().sort_values("opprettet")
+            if len(data) == 0:
+                continue
+            fig.add_trace(go.Scatter(
+                x=data["opprettet"], y=data[kol],
+                mode="lines+markers", name=navn,
+                line=dict(color=farge, width=2),
+                marker=dict(size=6),
+                hovertemplate=f"<b>{navn}</b>: %{{y:.1f}}/10<extra></extra>",
+            ))
+    fig.update_layout(
+        height=350,
+        yaxis=dict(title="Score (1–10)", range=[0, 10.5]),
+        xaxis_title="",
+        margin=dict(l=50, r=20, t=20, b=40),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.05),
+    )
+    # Referanselinjer
+    fig.add_hline(y=8, line_dash="dash", line_color="#2E7D32",
+                  opacity=0.4, annotation_text="Bra (8)", annotation_font_size=9)
+    fig.add_hline(y=6, line_dash="dash", line_color="#F9A825",
+                  opacity=0.4, annotation_text="OK (6)", annotation_font_size=9)
     return fig
 
 
@@ -575,66 +627,150 @@ def lag_kaldstart_plot(r: dict) -> go.Figure:
 
 def main():
     st.title("🚗 OBD2 Kjøredata Analyse")
-    st.caption("Car Scanner ELM OBD2 — interaktiv dataanalyse")
+    st.caption("Car Scanner ELM OBD2 — interaktiv dataanalyse med historikk")
 
     with st.sidebar:
         st.header("Last opp data")
         opplastet_fil = st.file_uploader(
             "Velg CSV-fil fra Car Scanner",
             type=["csv"],
-            help="Eksporter fra Car Scanner: Logger → Del som CSV",
+            help="Car Scanner → Logger → Del som CSV",
         )
         st.divider()
         st.markdown("**Om appen**")
         st.markdown(
-            "Laster inn OBD2-data og viser interaktive grafer og helseanalyse. "
-            "Zoom, pan og hover direkte i grafene."
+            "Laster inn OBD2-data, viser interaktive grafer, "
+            "helseanalyse og lagrer historikk automatisk."
         )
 
+    # ── INGEN FIL LASTET OPP ───────────────────────────────────────────────
     if opplastet_fil is None:
-        st.info("Last opp en CSV-fil i sidepanelet for å komme i gang.")
-        st.markdown("""
-        **Slik eksporterer du fra Car Scanner:**
-        1. Åpne Car Scanner på telefonen
-        2. Gå til **Logger** (nedre meny)
-        3. Velg en kjøreøkt
-        4. Trykk **Del** og velg **Eksporter som CSV**
-        5. Send filen til PC-en og last den opp her
-        """)
+        # Vis historikkoversikt selv uten fil
+        hist = hent_historikk()
+        if not hist.empty:
+            st.subheader(f"📚 Historikk – {len(hist)} lagrede kjøreturer")
+            fane_h1, fane_h2, fane_h3 = st.tabs(["📈 Trender", "🏆 Scorer", "📋 Alle turer"])
+
+            with fane_h1:
+                col1, col2 = st.columns(2)
+                with col1:
+                    if "snitt_forbruk" in hist.columns:
+                        st.plotly_chart(lag_historikk_trend(hist, "snitt_forbruk",
+                            "Snitt drivstofforbruk (L/h)", "#1B5E20"), use_container_width=True)
+                    if "snitt_rpm" in hist.columns:
+                        st.plotly_chart(lag_historikk_trend(hist, "snitt_rpm",
+                            "Snitt RPM", "#B71C1C"), use_container_width=True)
+                with col2:
+                    if "snitt_last" in hist.columns:
+                        st.plotly_chart(lag_historikk_trend(hist, "snitt_last",
+                            "Snitt motorlast (%)", "#E65100"), use_container_width=True)
+                    if "maks_temp" in hist.columns:
+                        st.plotly_chart(lag_historikk_trend(hist, "maks_temp",
+                            "Maks kjølevæsketemp (°C)", "#880E4F"), use_container_width=True)
+
+            with fane_h2:
+                st.plotly_chart(lag_score_historikk(hist), use_container_width=True)
+
+            with fane_h3:
+                vis_kol = ["opprettet", "filnavn", "varighet_s", "snitt_rpm",
+                           "snitt_forbruk", "total_score", "kaldstart_score"]
+                vis_kol = [k for k in vis_kol if k in hist.columns]
+                st.dataframe(
+                    hist[vis_kol].rename(columns={
+                        "opprettet": "Dato", "filnavn": "Fil",
+                        "varighet_s": "Varighet (s)", "snitt_rpm": "Snitt RPM",
+                        "snitt_forbruk": "Forbruk (L/h)", "total_score": "Totalscore",
+                        "kaldstart_score": "Kaldstart",
+                    }).round(2),
+                    use_container_width=True, height=400,
+                )
+        else:
+            st.info("Last opp en CSV-fil i sidepanelet for å komme i gang.")
+            st.markdown("""
+            **Slik eksporterer du fra Car Scanner:**
+            1. Åpne Car Scanner på telefonen
+            2. Gå til **Logger** (nedre meny)
+            3. Velg en kjøreøkt
+            4. Trykk **Del** og velg **Eksporter som CSV**
+            5. Last opp filen her
+            """)
         return
 
+    # ── LES INN FIL ────────────────────────────────────────────────────────
     try:
-        df = importer_car_scanner(opplastet_fil.read())
+        filinnhold = opplastet_fil.read()
+        df = importer_car_scanner(filinnhold)
     except Exception as e:
         st.error(f"Kunne ikke lese filen: {e}")
         return
 
     tilgjengelige_pid = [p for p in df.columns if p not in SKJUL]
-
     pid_til_navn = {
         pid: f"{SIGNALER[pid][0]} ({SIGNALER[pid][1]})" if pid in SIGNALER else pid
         for pid in tilgjengelige_pid
     }
     navn_til_pid = {v: k for k, v in pid_til_navn.items()}
 
+    # ── ANALYSER (kjøres en gang og deles mellom faner) ────────────────────
+    stats   = beregn_statistikk(df)
+    analyser = {
+        "kaldstart":  analyser_kaldstart(df),
+        "drivstoff":  analyser_drivstoff(df),
+        "batteri":    analyser_batteri(df),
+        "feilkoder":  analyser_feilkoder(df),
+        "motorlast":  analyser_motorlast(df),
+    }
+    total = beregn_total(analyser)
+
+    # ── LAGRE TIL SUPABASE (automatisk ved første visning av fil) ──────────
+    cache_key = f"lagret_{opplastet_fil.name}"
+    if cache_key not in st.session_state:
+        rad = {
+            "filnavn":        opplastet_fil.name,
+            "opprettet":      datetime.utcnow().isoformat(),
+            "varighet_s":     float(stats.get("varighet_s", 0)),
+            "snitt_rpm":      float(stats.get("snitt_rpm", 0)) if stats.get("snitt_rpm") else None,
+            "maks_rpm":       float(stats.get("maks_rpm", 0))  if stats.get("maks_rpm")  else None,
+            "snitt_last":     float(stats.get("snitt_last", 0)) if stats.get("snitt_last") else None,
+            "maks_last":      float(stats.get("maks_last", 0))  if stats.get("maks_last")  else None,
+            "snitt_forbruk":  float(stats.get("snitt_forbruk", 0)) if stats.get("snitt_forbruk") else None,
+            "maks_forbruk":   float(stats.get("maks_forbruk", 0))  if stats.get("maks_forbruk")  else None,
+            "total_drivstoff":float(stats.get("total_drivstoff", 0)) if stats.get("total_drivstoff") else None,
+            "distanse":       float(stats.get("distanse", 0)) if stats.get("distanse") else None,
+            "maks_temp":      float(analyser["kaldstart"].get("maks_temp", 0)) if analyser["kaldstart"].get("maks_temp") else None,
+            "snitt_maf":      None,
+            "batteri_v":      float(analyser["batteri"].get("snitt_v", 0)) if analyser["batteri"].get("snitt_v") else None,
+            "kaldstart_score":analyser["kaldstart"].get("score"),
+            "drivstoff_score":analyser["drivstoff"].get("score"),
+            "batteri_score":  analyser["batteri"].get("score"),
+            "feilkode_score": analyser["feilkoder"].get("score"),
+            "motorlast_score":analyser["motorlast"].get("score"),
+            "total_score":    float(total),
+        }
+        if lagre_kjoretur(rad):
+            st.session_state[cache_key] = True
+            st.toast("Kjøretur lagret i historikk!", icon="✅")
+            # Tving oppdatering av historikk-cache
+            hent_historikk.clear()
+
     # ── FANER ──────────────────────────────────────────────────────────────
-    fane1, fane2, fane3, fane4, fane5 = st.tabs([
-        "📊 Dashboard", "❤️ Bilhelse", "📈 Tidsserier", "🔍 Utforsk", "📋 Rådata"
+    fane1, fane2, fane3, fane4, fane5, fane6 = st.tabs([
+        "📊 Dashboard", "❤️ Bilhelse", "📚 Historikk",
+        "📈 Tidsserier", "🔍 Utforsk", "📋 Rådata"
     ])
 
     # ── DASHBOARD ──────────────────────────────────────────────────────────
     with fane1:
-        stats = beregn_statistikk(df)
         col1, col2, col3, col4 = st.columns(4)
-        with col1: st.metric("Varighet",         f"{stats.get('varighet_min', 0):.1f} min")
-        with col2: st.metric("Toppfart",          f"{stats.get('toppfart', 0):.0f} km/h")
-        with col3: st.metric("Snitt RPM",         f"{stats.get('snitt_rpm', 0):.0f}")
-        with col4: st.metric("Snitt forbruk",     f"{stats.get('snitt_forbruk', 0):.2f} L/h")
+        with col1: st.metric("Varighet",           f"{stats.get('varighet_min', 0):.1f} min")
+        with col2: st.metric("Toppfart",            f"{stats.get('toppfart', 0):.0f} km/h")
+        with col3: st.metric("Snitt RPM",           f"{stats.get('snitt_rpm', 0):.0f}")
+        with col4: st.metric("Snitt forbruk",       f"{stats.get('snitt_forbruk', 0):.2f} L/h")
         col5, col6, col7, col8 = st.columns(4)
         with col5: st.metric("Snittfart (kjøring)", f"{stats.get('snittfart', 0):.1f} km/h")
-        with col6: st.metric("Maks motorlast",    f"{stats.get('maks_last', 0):.1f} %")
-        with col7: st.metric("Drivstoff brukt",   f"{stats.get('total_drivstoff', 0):.4f} L")
-        with col8: st.metric("Distanse",          f"{stats.get('distanse', 0):.2f} km")
+        with col6: st.metric("Maks motorlast",      f"{stats.get('maks_last', 0):.1f} %")
+        with col7: st.metric("Drivstoff brukt",     f"{stats.get('total_drivstoff', 0):.4f} L")
+        with col8: st.metric("Distanse",            f"{stats.get('distanse', 0):.2f} km")
         st.divider()
         st.subheader("Oversikt – fire hoveddisignaler")
         st.plotly_chart(lag_dashboard(df), use_container_width=True)
@@ -642,22 +778,8 @@ def main():
     # ── BILHELSE ───────────────────────────────────────────────────────────
     with fane2:
         st.subheader("Bilhelse-analyse")
-        st.caption(
-            "Basert på OBD2-data fra denne kjøreøkten. "
-            "Scores er estimater — ikke erstatning for verkstedssjekk."
-        )
+        st.caption("Scores er estimater — ikke erstatning for verkstedssjekk.")
 
-        # Kjør alle analyser
-        analyser = {
-            "kaldstart":  analyser_kaldstart(df),
-            "drivstoff":  analyser_drivstoff(df),
-            "batteri":    analyser_batteri(df),
-            "feilkoder":  analyser_feilkoder(df),
-            "motorlast":  analyser_motorlast(df),
-        }
-        total = beregn_total(analyser)
-
-        # ── Totalvurdering ──
         col_t1, col_t2 = st.columns([1, 2])
         with col_t1:
             st.plotly_chart(lag_gauge_total(total, "Totalvurdering – Bilhelse"),
@@ -676,7 +798,7 @@ def main():
                 if a["score"] is not None:
                     s = a["score"]
                     st.markdown(
-                        f"{score_emoji(s)} **{etikett}** &nbsp;&nbsp; "
+                        f"{score_emoji(s)} **{etikett}** &nbsp;&nbsp;"
                         f"<span style='color:{score_farge(s)};font-size:1.1em;font-weight:bold'>"
                         f"{s}/10</span>",
                         unsafe_allow_html=True,
@@ -685,16 +807,13 @@ def main():
                     st.markdown(f"⚪ **{etikett}** — ikke nok data")
 
         st.divider()
-
-        # ── Detaljkort per faktor ──
         faktorer = [
-            ("kaldstart",  "🌡️ Kaldstart-adferd"),
-            ("drivstoff",  "⛽ Drivstofforbruk"),
-            ("batteri",    "🔋 Batteri / Generator"),
-            ("feilkoder",  "🔧 Feilkoder (MIL)"),
-            ("motorlast",  "⚙️ Motorlast tomgang"),
+            ("kaldstart", "🌡️ Kaldstart-adferd"),
+            ("drivstoff", "⛽ Drivstofforbruk"),
+            ("batteri",   "🔋 Batteri / Generator"),
+            ("feilkoder", "🔧 Feilkoder (MIL)"),
+            ("motorlast", "⚙️ Motorlast tomgang"),
         ]
-
         for navn, tittel in faktorer:
             a = analyser[navn]
             with st.expander(
@@ -704,44 +823,100 @@ def main():
                 if not a["tilgjengelig"]:
                     st.warning(a["forklaring"])
                     continue
-
                 col_g, col_d = st.columns([1, 2])
-
                 with col_g:
-                    st.plotly_chart(
-                        lag_gauge(a["score"], tittel.split(" ", 1)[1]),
-                        use_container_width=True,
-                    )
-
-
+                    st.plotly_chart(lag_gauge(a["score"], tittel.split(" ", 1)[1]),
+                                    use_container_width=True)
                 with col_d:
                     st.markdown("**Funn:**")
                     for linje in a["detaljer"]:
                         st.markdown(f"- {linje}")
                     st.info(a["forklaring"])
-
-                # Ekstra plott per faktor
                 if navn == "kaldstart" and a.get("tid_serie") is not None:
                     st.markdown("**Kjølevæsketemperatur og RPM over tid:**")
                     st.plotly_chart(lag_kaldstart_plot(a), use_container_width=True)
-
                 if navn == "drivstoff":
                     st.markdown("**Faktisk vs forventet drivstofforbruk:**")
                     st.plotly_chart(lag_forbruk_plot(a), use_container_width=True)
 
-        # ── GPS-info ──
-        st.divider()
-        st.markdown("### 🗺️ GPS og kjørerute")
-        st.info(
-            "Denne CSV-filen inneholder ikke GPS-koordinater. "
-            "Car Scanner logger ikke GPS automatisk. "
-            "For å få kartvisning av kjøreruten, gå til **Innstillinger → Logger** "
-            "i Car Scanner og aktiver **GPS-logging** før neste kjøretur. "
-            "Da vil CSV-filen inneholde Latitude/Longitude-kolonner som kan vises på kart her."
-        )
+    # ── HISTORIKK ──────────────────────────────────────────────────────────
+    with fane3:
+        hist = hent_historikk()
+        if hist.empty:
+            st.info("Ingen historikk enda. Last opp flere kjøreturer for å se trender.")
+        else:
+            st.subheader(f"📚 {len(hist)} lagrede kjøreturer")
+
+            # Nøkkeltall sammenlignet med historisk snitt
+            if len(hist) > 1:
+                st.markdown("#### Denne turen vs historisk snitt")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    hist_snitt = hist["total_score"].mean()
+                    st.metric("Totalscore", f"{total:.1f}/10",
+                              delta=f"{total - hist_snitt:+.1f} vs snitt")
+                with col2:
+                    if "snitt_forbruk" in hist.columns:
+                        h_snitt = hist["snitt_forbruk"].mean()
+                        n_snitt = stats.get("snitt_forbruk", 0)
+                        st.metric("Forbruk", f"{n_snitt:.2f} L/h",
+                                  delta=f"{n_snitt - h_snitt:+.2f} vs snitt",
+                                  delta_color="inverse")
+                with col3:
+                    if "snitt_rpm" in hist.columns:
+                        h_snitt = hist["snitt_rpm"].mean()
+                        n_snitt = stats.get("snitt_rpm", 0)
+                        st.metric("Snitt RPM", f"{n_snitt:.0f}",
+                                  delta=f"{n_snitt - h_snitt:+.0f} vs snitt")
+                with col4:
+                    if "snitt_last" in hist.columns:
+                        h_snitt = hist["snitt_last"].mean()
+                        n_snitt = stats.get("snitt_last", 0)
+                        st.metric("Motorlast", f"{n_snitt:.1f}%",
+                                  delta=f"{n_snitt - h_snitt:+.1f}% vs snitt")
+                st.divider()
+
+            # Scorer over tid
+            st.markdown("#### Helssescorer over tid")
+            st.plotly_chart(lag_score_historikk(hist), use_container_width=True)
+
+            # Trender
+            st.markdown("#### Nøkkeltrender")
+            col1, col2 = st.columns(2)
+            with col1:
+                if "snitt_forbruk" in hist.columns:
+                    st.plotly_chart(lag_historikk_trend(hist, "snitt_forbruk",
+                        "Drivstofforbruk (L/h)", "#1B5E20"), use_container_width=True)
+                if "snitt_rpm" in hist.columns:
+                    st.plotly_chart(lag_historikk_trend(hist, "snitt_rpm",
+                        "Snitt RPM", "#B71C1C"), use_container_width=True)
+            with col2:
+                if "snitt_last" in hist.columns:
+                    st.plotly_chart(lag_historikk_trend(hist, "snitt_last",
+                        "Motorlast (%)", "#E65100"), use_container_width=True)
+                if "maks_temp" in hist.columns:
+                    st.plotly_chart(lag_historikk_trend(hist, "maks_temp",
+                        "Maks kjølevæsketemp (°C)", "#880E4F"), use_container_width=True)
+
+            # Tabell over alle turer
+            st.markdown("#### Alle turer")
+            vis_kol = ["opprettet", "filnavn", "varighet_s", "snitt_rpm",
+                       "snitt_forbruk", "total_score", "kaldstart_score",
+                       "drivstoff_score", "motorlast_score"]
+            vis_kol = [k for k in vis_kol if k in hist.columns]
+            st.dataframe(
+                hist[vis_kol].rename(columns={
+                    "opprettet": "Dato", "filnavn": "Fil",
+                    "varighet_s": "Varighet (s)", "snitt_rpm": "RPM",
+                    "snitt_forbruk": "Forbruk (L/h)", "total_score": "Total",
+                    "kaldstart_score": "Kaldstart", "drivstoff_score": "Drivstoff",
+                    "motorlast_score": "Motorlast",
+                }).round(2),
+                use_container_width=True, height=300,
+            )
 
     # ── TIDSSERIER ─────────────────────────────────────────────────────────
-    with fane3:
+    with fane4:
         st.subheader("Velg signaler å vise")
         standard_valg = [
             pid_til_navn[p] for p in
@@ -749,10 +924,8 @@ def main():
              "Calculated instant fuel rate", "Vehicle acceleration"]
             if p in pid_til_navn
         ]
-        valgte_navn = st.multiselect(
-            "Signaler", options=list(pid_til_navn.values()),
-            default=standard_valg,
-        )
+        valgte_navn = st.multiselect("Signaler", options=list(pid_til_navn.values()),
+                                     default=standard_valg)
         valgte_pid = [navn_til_pid[n] for n in valgte_navn]
         if valgte_pid:
             st.plotly_chart(lag_tidsserie(df, valgte_pid), use_container_width=True)
@@ -760,7 +933,7 @@ def main():
             st.warning("Velg minst ett signal.")
 
     # ── UTFORSK ────────────────────────────────────────────────────────────
-    with fane4:
+    with fane5:
         st.subheader("Scatter-plott")
         alle_navn = list(pid_til_navn.values())
         col_a, col_b, col_c = st.columns(3)
@@ -783,13 +956,13 @@ def main():
         st.plotly_chart(lag_histogram(df, navn_til_pid[hist_valg]), use_container_width=True)
 
     # ── RÅDATA ─────────────────────────────────────────────────────────────
-    with fane5:
+    with fane6:
         st.subheader("Rådata (bred tabell)")
         st.caption(f"{len(df)} tidspunkter, {len(df.columns)} signaler")
         vis_kolonner = st.multiselect(
             "Velg kolonner å vise", options=list(df.columns),
-            default=[p for p in ["Vehicle speed","Engine RPM",
-                "Calculated engine load value","Calculated instant fuel rate"]
+            default=[p for p in ["Vehicle speed", "Engine RPM",
+                "Calculated engine load value", "Calculated instant fuel rate"]
                 if p in df.columns],
         )
         if vis_kolonner:
